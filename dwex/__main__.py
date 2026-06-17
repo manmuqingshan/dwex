@@ -20,7 +20,7 @@ from .treedlg import TreeDlg
 from .abbrevs import AbbrevsDlg
 
 # Sync with version in setup.py
-version = (4, 85)
+version = (4, 86)
 the_app = None
 
 # TODO:
@@ -832,7 +832,11 @@ class TheWindow(QMainWindow):
     def on_abbrevs(self):
         die = self.the_tree.currentIndex().internalPointer()
         if die:
-            AbbrevsDlg(self, die.cu, self.lowlevel, self.hex, self.prefix).show()
+            cu = die.cu
+            if cu.header.version >= 2:
+                AbbrevsDlg(self, cu, self.lowlevel, self.hex, self.prefix).show()
+            else:
+                self.show_warning("Abbreviations information is only available for DWARF v2 and above.")
 
     def on_copy(self, v):
         cb = QApplication.clipboard()

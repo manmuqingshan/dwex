@@ -33,7 +33,7 @@ class AbbrevsDlg(QDialog):
         bottom_pane = QVBoxLayout()
         bottom_pane.setContentsMargins(0, 0, 0, 0)
         attributes = self.attributes = QTableView()
-        attributes.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
+        attributes.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         attributes.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         bottom_pane.addWidget(attributes)
 
