@@ -30,6 +30,8 @@ from .ctypes_helper import *
 from struct import pack_into
 
 from ctypes import *
+if 'BigEndianStruct' not in dir(ctypes):
+    from ..ctypes._endian import *
 
 class Container(object):
 
