@@ -20,7 +20,7 @@ from .treedlg import TreeDlg
 from .abbrevs import AbbrevsDlg
 
 # Sync with version in setup.py
-version = (4, 86)
+version = (4, 87)
 the_app = None
 
 # TODO:
