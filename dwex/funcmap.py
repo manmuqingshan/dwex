@@ -1,49 +1,26 @@
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from bisect import bisect_left
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import *
 
 from .details import GenericTableModel
 from .dwarfutil import get_code_location, has_code_location, subprogram_name
-from .locals import LoadedModuleDlgBase, WaitCursor
+from .locals import LoadedModuleDlgBase
+from .gather import GatherThread
 
 # TODO: unite UI with aranges - dialog with a table and potentially a search bar
 # TODO: sorting
 
-class GatherFuncsThread(QThread):
-    def __init__(self, parent, di):
-        QThread.__init__(self, parent)
-        self.cancelled = False
-        self.funcs = None
-        self.exc = None
-        self.dwarfinfo = di
-
-    progress = pyqtSignal(int)
-
-    def cancel(self):
-        self.cancelled = True
-
-    def run(self):
-        try:
-            funcs = []
-            for cu in self.dwarfinfo._unsorted_CUs:
-                for die in cu.iter_DIEs():
-                    self.yieldCurrentThread()
-                    if self.cancelled:
-                        return
-
-                    if die.tag in ('DW_TAG_subprogram', 'DW_TAG_global_subroutine') and has_code_location(die):
-                        self.progress.emit(die.offset)
-                        IP = get_code_location(die).start_address()
-                        i = bisect_left(funcs, IP, key=lambda f:f[3])
-                        funcs.insert(i, (hex(IP), subprogram_name(die), die, IP))
-            self.funcs = funcs
-        except Exception as exc:
-            self.exc = exc
-
+class GatherFuncsThread(GatherThread):
+    def on_die(self, die, funcs):
+        if die.tag in ('DW_TAG_subprogram', 'DW_TAG_global_subroutine') and has_code_location(die):
+            self.progress.emit(die.offset)
+            IP = get_code_location(die).start_address()
+            i = bisect_left(funcs, IP, key=lambda f:f[3])
+            funcs.insert(i, (hex(IP), subprogram_name(die), die, IP))
 
 class FuncMapDlg(LoadedModuleDlgBase):
     def __init__(self, win, hex, funcs):
-        LoadedModuleDlgBase.__init__(self, win)
+        super().__init__(win)
         self.selected_die = None
         model = GenericTableModel(("Start address", 'Function'), funcs)
 

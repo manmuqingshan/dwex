@@ -18,10 +18,17 @@ from .funcmap import FuncMapDlg, GatherFuncsThread
 from .fx import WaitCursor, ArrowCursor
 from .treedlg import TreeDlg
 from .abbrevs import AbbrevsDlg
+from .datasec import GatherStaticDataThread, DataSectionDlg
+from .gather import gather_to_dialog
 
 # Sync with version in setup.py
 version = (4, 87)
 the_app = None
+
+# Env variables (all boolean):
+# DWEX_LOADLAST
+# DWEX_NOEXCHOOK
+# DWEX_NOEXCHOOK
 
 # TODO:
 # On MacOS, start without a main window, instead show the Open dialog
@@ -211,6 +218,7 @@ class TheWindow(QMainWindow):
             self.byoffset_tbitem.setEnabled(has_CUs)
             self.localsat_menuitem.setEnabled(has_CUs)
             self.funcmap_menuitem.setEnabled(has_CUs)
+            self.datasec_menuitem.setEnabled(has_CUs)
             self.aranges_menuitem.setEnabled(has_CUs)
             self.frames_menuitem.setEnabled(True)
             self.unwind_menuitem.setEnabled(di._format in (1, 5))
@@ -870,28 +878,17 @@ class TheWindow(QMainWindow):
     def on_localsat(self):
         dlg = LocalsDlg(self, self.dwarfinfo, self.prefix, self.dwarfregnames, self.hex)
         if dlg.exec() == QDialog.DialogCode.Accepted and dlg.selected_die:
-             self.the_tree.setCurrentIndex(self.tree_model.index_for_die(dlg.selected_die))
+             self.navigate_to_die(dlg.selected_die)
 
     def on_funcmap(self):
-        th = GatherFuncsThread(self, self.dwarfinfo)
-        def done():
-            if not pd.wasCanceled():
-                pd.close()
+        gather_to_dialog(self, self.dwarfinfo, GatherFuncsThread, FuncMapDlg, self.hex, "Gathering functions...")
 
-            if th.funcs:
-                dlg = FuncMapDlg(self, self.hex, th.funcs)
-                if dlg.exec() == QDialog.DialogCode.Accepted and dlg.selected_die:
-                    self.the_tree.setCurrentIndex(self.tree_model.index_for_die(dlg.selected_die))
-            elif th.exc:
-                print(th.exc)
+    def on_datasec(self):
+        gather_to_dialog(self, self.dwarfinfo, GatherStaticDataThread, DataSectionDlg, self.hex, "Gathering static variables...")
 
-        last_CU = self.dwarfinfo._unsorted_CUs[-1]
-        pd = QProgressDialog("Gathering functions...", "Cancel", 0, last_CU.cu_offset + last_CU.size, self, Qt.WindowType.Dialog)
-        pd.canceled.connect(th.cancel)
-        pd.show()
-        th.progress.connect(pd.setValue)
-        th.finished.connect(done)
-        th.start() # Will continue in done
+    # Followup for dialogs that support navigating to a DIE
+    def navigate_to_die(self, die):
+        self.the_tree.setCurrentIndex(self.tree_model.index_for_die(die))
 
     def on_aranges(self):
         from elftools.common.exceptions import ELFParseError

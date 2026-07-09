@@ -4,6 +4,7 @@ from PyQt6.QtGui import QFontInfo, QFont, QBrush
 
 _bold_font = None
 _fixed_font = None
+_italic_font = None
 blue_brush = QBrush(Qt.GlobalColor.blue)
 ltgrey_brush = QBrush(Qt.GlobalColor.lightGray)
 
@@ -13,6 +14,13 @@ def bold_font():
         fi = QFontInfo(QApplication.font())
         _bold_font = QFont(fi.family(), fi.pointSize(), QFont.Weight.Bold)
     return _bold_font
+
+def italic_font():
+    global _italic_font
+    if not _italic_font:
+        fi = QFontInfo(QApplication.font())
+        _italic_font = QFont(fi.family(), fi.pointSize(), QFont.Weight.Normal, True)
+    return _italic_font
 
 def fixed_font():
     global _fixed_font
