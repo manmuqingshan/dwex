@@ -583,3 +583,9 @@ def format_tag(tag, prefix):
         return ('DW_TAG_user_%X' if prefix else 'user_%X') % tag
     else:
         return tag if prefix or not str(tag).startswith('DW_TAG_') else tag[7:]
+    
+def format_attr(attr, prefix):
+    if isinstance(attr, int): # Happens with user tags, #1472
+        return ('DW_AT_user_%X' if prefix else 'user_%X') % attr
+    else:
+        return attr if prefix or not str(attr).startswith('DW_AT_') else attr[6:]

@@ -2,7 +2,7 @@
 
 from io import BytesIO
 from collections import OrderedDict, namedtuple
-from bisect import bisect_left
+from bisect import bisect_left, bisect_right
 from elftools.dwarf.dwarfinfo import DwarfConfig, DebugSectionDescriptor
 from elftools.dwarf.die import AttributeValue
 from elftools.dwarf.structs import DWARFStructs
@@ -28,22 +28,196 @@ ENUM_FMT = dict(
    FMT_UT_C_X = 5,
    FMT_UT_X_C = 6,
    FMT_UT_X_X = 7,
-   FMT_ET = 8
+   FMT_ET     = 8
 )
 
+ENUM_FMT_reverse = dict((v, k) for k, v in ENUM_FMT.items())
+
+ENUM_FUND_TYPE = dict(
+    FT_char             = 0x0001,
+    FT_signed_char      = 0x0002,
+    FT_unsigned_char    = 0x0003,
+    FT_short            = 0x0004,
+    FT_signed_short     = 0x0005,
+    FT_unsigned_short   = 0x0006,
+    FT_integer          = 0x0007,
+    FT_signed_integer   = 0x0008,
+    FT_unsigned_integer = 0x0009,
+    FT_long             = 0x000a,
+    FT_signed_long      = 0x000b,
+    FT_unsigned_long    = 0x000c,
+    FT_pointer          = 0x000d,
+    FT_float            = 0x000e,
+    FT_dbl_prec_float   = 0x000f,
+    FT_ext_prec_float   = 0x0010,
+    FT_complex          = 0x0011,
+    FT_dbl_prec_complex = 0x0012,
+    FT_void             = 0x0014,
+    FT_boolean          = 0x0015,
+    FT_ext_prec_complex = 0x0016,
+    FT_label            = 0x0017,
+    FT_lo_user          = 0x8000,
+    FT_hi_user          = 0xffff    
+)
+
+ENUM_FUND_TYPE_reverse = dict((v, k) for k, v in ENUM_FUND_TYPE.items())
+
 DW_OP_name2opcode = dict(
-    DW_OP_reg = 0x01,
+    DW_OP_reg     = 0x01,
     DW_OP_basereg = 0x02,
-    DW_OP_addr = 0x03,
-    DW_OP_const = 0x04,
-    DW_OP_deref2 = 0x05,
-    DW_OP_deref = 0x06,
-    DW_OP_deref4 = 0x06,
-    DW_OP_add = 0x07,
+    DW_OP_addr    = 0x03,
+    DW_OP_const   = 0x04,
+    DW_OP_deref2  = 0x05,
+    DW_OP_deref   = 0x06,
+    DW_OP_deref4  = 0x06,
+    DW_OP_add     = 0x07,
     DW_OP_user_0x80 = 0x80 #Extension op, not sure what's the deal with that
 )
 
 DW_OP_opcode2name = dict((v, k) for k, v in DW_OP_name2opcode.items())
+
+ENUM_MOD = dict(
+    MOD_pointer_to   = 0x01,
+    MOD_reference_to = 0x02,
+    MOD_const        = 0x03,
+    MOD_volatile     = 0x04,
+    MOD_lo_user      = 0x80,
+    MOD_hi_user      = 0xff
+)
+
+ENUM_MOD_reverse = dict((v, k) for k, v in ENUM_MOD.items())
+
+# Takes code or string
+def fundamental_type_size(ft, die):
+    if isinstance(ft, str):
+        if ft.startswith('FT_user_'):
+            ft = int(ft[8:], 16)
+        else:
+            ft = ENUM_FUND_TYPE[ft]
+
+    if 1 <= ft <= 3:
+        return 1
+    elif ft <=6:
+         return 2
+    elif ft <= 0x9:
+        return 4
+    elif ft <= 0xd: # Long and pointer; 64 on Linux/64
+        return die.cu.header.address_size
+    elif ft == 0xe: # float
+        return 4
+    elif ft == 0xf: # double
+        return 8
+    elif ft == 0x10: # extended precision float
+        return 10
+    elif ft == 0x11: # complex  
+        return 8
+    elif ft == 0x12: # double precision complex
+        return 16
+    elif ft == 0x15: # boolean ?
+        return 1
+    elif ft == 0x16: # extended precision complex   
+        return 20
+    elif ft >= 0x8000 and (ft & 0xFF) != 0:
+        return ft & 0xFF
+    
+# index_type is a fundamental type name from ENUM_FUND_TYPE or FT_user_XXXX or a DIE offset (int)
+# low, high are either int or list of int for expressin blobs. Expressions are not parsed.
+ArraySubDimension = namedtuple('ArraySubDimension', ('fmt', 'index_type', 'low', 'high')) 
+
+# elem_type is driven by attr/form
+# fundamental: string from the ENUM_FUND_TYPE or FT_user_XXXX
+# user-defined: DIE offset, int
+# modified: (tuple of modifiers followed by one of the above)
+ArraySubElementType = namedtuple('ArraySubElementType', ('fmt', 'attr', 'form', 'elem_type'))
+
+def fund_type_name(ft):
+    return ENUM_FUND_TYPE_reverse[ft] if ft in ENUM_FUND_TYPE_reverse else f'FT_user_{ft:X}'
+
+# Given a blob with modifiers followed by a fundamental type, returns a tuple of modifier names followed by the fundamental type name
+def parse_mod_fund_type(value, die):
+    le = die.cu.structs.little_endian
+    bo = 'little' if le else 'big'
+    return tuple(ENUM_MOD_reverse[b] for b in value[:-2]) + (fund_type_name(int.from_bytes(value[-2:], bo)),)
+
+# Given a blob with modifiers followed by a fundamental type, returns a tuple of modifier names followed by the offset
+def parse_mod_user_type(value, die):
+    le = die.cu.structs.little_endian
+    bo = 'little' if le else 'big'
+    asz = die.cu.header.address_size # Should be DWARF offset size, but irrelevant for V1
+    offset = int.from_bytes(value[-asz:], bo)
+    return tuple(ENUM_MOD_reverse[b] for b in value[:-asz]) + (offset,)
+
+def mods_have_pointer(mods):
+    return any(m for m in mods if m in ('MOD_pointer_to', 'MOD_reference_to'))
+
+# For parsing the value of AT_subscr_data attribute in DWARFv1.
+# Returns a list of ArraySubDimension and AraySubElementType
+def parse_array_subscripts(subs, die):
+    result = list()
+    stm = BytesIO(bytes(subs))
+    structs = die.cu.structs
+    while stm.tell() < len(subs):
+        fmt = ENUM_FMT_reverse[struct_parse(structs.Dwarf_uint8(''), stm)]
+        if fmt == 'FMT_ET': # Element type
+            # Followed by an attribute/form code, form in low nybble, attribute code in high 3 nybbles 
+            # Follosed by the data encoded according to the form - either block or UInt16 for fundamental types
+            elem_attr = struct_parse(structs.Dwarf_uint16(''), stm)
+            elem_form = FORM_reverse[elem_attr & 0xf]
+            elem_attr = ATTR_reverse[elem_attr >> 4]
+            value = struct_parse(structs.Dwarf_dw_form[elem_form], stm)
+            if elem_attr == 'DW_AT_mod_fund_type':
+                value = parse_mod_fund_type(value, die)
+            elif elem_attr == 'DW_AT_mod_u_d_type':
+                value = parse_mod_user_type(value, die)
+            elif elem_attr == 'DW_AT_fund_type':
+                value = fund_type_name(value)
+            result.append(ArraySubElementType(fmt, elem_attr, elem_form, elem_type=value))
+        else: # Subscript description, like FMT_FT_C_C
+            index_type = struct_parse((structs.Dwarf_uint16 if fmt[4] == 'F' else structs.Dwarf_offset)(''), stm)
+            # Constants are long sizes in the spec, assume same as pointer
+            # The format of dynamic locations is not specified explicitly
+            low = struct_parse(structs.Dwarf_target_addr('') if fmt[7] == 'C' else structs.Dwarf_dw_form['DW_FORM_block2'], stm)
+            high = struct_parse(structs.Dwarf_target_addr('') if fmt[9] == 'C' else structs.Dwarf_dw_form['DW_FORM_block2'], stm)
+            result.append(ArraySubDimension(fmt, ENUM_FUND_TYPE_reverse[index_type] if fmt[4] == 'F' else index_type, low, high))
+    return result
+
+# Returns (count, size)
+# decode_size is a function that take a DIE - for getting user defined type size
+def decode_array_subscripts(subs, die, decode_size):
+    count = elem_size = None
+    asz = die.cu.header.address_size
+    bo = 'little' if die.cu.structs.little_endian else 'big'
+    for l in parse_array_subscripts(subs, die):
+        if isinstance(l, ArraySubDimension):
+            if l.fmt[7] == 'C' and l.fmt[9] == 'C':
+                if count is None:
+                    count = 1
+                count *= l.high - l.low + 1
+            else:
+                return (None, None) # Non-const subscripts are a deal breaker - dynamic array
+        elif isinstance(l, ArraySubElementType):
+            elem_attr = l.attr
+            value = l.elem_type
+            if elem_attr == 'DW_AT_fund_type':
+                elem_size = fundamental_type_size(value, die)
+            elif elem_attr == 'DW_AT_user_def_type':
+                elem_size = decode_size(die.get_DIE_at_offset(value))
+            elif elem_attr == 'DW_AT_mod_fund_type':
+                if mods_have_pointer(value[:-1]):
+                    elem_size = asz # Pointer or reference
+                else:
+                    elem_size = fundamental_type_size(value[-1], die)
+            elif elem_attr == 'DW_AT_mod_u_d_type':
+                if mods_have_pointer(value[:-1]):
+                    elem_size = asz # Pointer or reference
+                else:
+                    elem_size = decode_size(die.get_DIE_at_offset(value[-1]))
+            else:
+                raise ValueError(f"Unsupported element type attribute in array subscript element type descriptor: {elem_attr}")
+        else:
+            raise ValueError(f"Unsupported element in array subscript descriptor: {l}")
+    return (count, elem_size)
+
 
 class DIEV1(object):
     def __init__(self, stm, cu, di):
@@ -114,17 +288,31 @@ class DIEV1(object):
     def sibling(self):
         return self.attributes['DW_AT_sibling'].value
     
+    # offset is absolute, cross-CU navigation is supported
+    def get_DIE_at_offset(self, offset):
+        cu = self.cu
+        if cu.cu_offset <= offset < cu.cu_offset + cu.header.unit_length:
+            return cu.DIE_at_offset(offset)
+        else:
+            # Take advantage of the CU cache here
+            di = cu.dwarfinfo
+            i = bisect_right(di._CU_offsets, offset) - 1
+            if 0 <= i < len(di._CU_offsets):
+                target_cu = di._unsorted_CUs[i]            
+                return target_cu.DIE_at_offset(offset)
+    
     def get_DIE_from_attribute(self, attr_name):
         if attr_name in self.attributes:
-            offset = self.attributes[attr_name].value
-            cu = self.cu
-            if cu.cu_offset <= offset < cu.cu_offset + cu.header.unit_length:
-                return cu.DIE_at_offset(offset)
-            else:
-                target_cu = next((c for c in self.dwarfinfo.iter_CUs() if c.cu_offset <= offset < c.cu_offset + c.header.unit_length), None)
-                if target_cu:
-                    return target_cu.DIE_at_offset(offset)
+            v = self.attributes[attr_name].value
+            if attr_name == 'DW_AT_mod_u_t_type': # Modifiers followed by offset
+                al = self.cu.header.address_size
+                v = v[-al:]
+                offset = int.from_bytes(v, byteorder='little' if self.cu.structs.little_endian else 'big')
+            target_die = self.get_DIE_at_offset(self.attributes[attr_name].value)
+            if target_die is None:
                 raise ValueError(f"Attribute {attr_name} with offset 0x{offset:X} is out of bounds.")
+            else:
+                return target_die
         return None
 
 class CompileUnitV1(object):

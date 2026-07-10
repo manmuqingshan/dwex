@@ -9,7 +9,7 @@ from .dwarfutil import top_die_file_name
 from .locals import LoadedModuleDlgBase
 from .gather import GatherThread
 from .details import GenericTableModel
-from .dwarfone import DWARFExprParserV1
+from .dwarfone import DWARFExprParserV1, decode_array_subscripts, fundamental_type_size, mods_have_pointer, parse_mod_fund_type, parse_mod_user_type
 from .die import safe_DIE_name
 from .fx import italic_font, ltgrey_brush
 
@@ -24,6 +24,26 @@ def get_lang(cu):
 one_based_langs = ('Fortran', 'Pascal', 'Ada', 'Modula', 'PLI', 'Cobol', 'Julia')
 def one_based_lang(lang):
     return lang and any(l for l in one_based_langs if lang.startswith(l))
+
+def array_count(die):
+    count = 1
+    #got_subranges = False
+    for subrange_die in die.iter_children():
+        if subrange_die.tag == 'DW_TAG_subrange_type':
+            #got_subranges = True
+            if 'DW_AT_count' in subrange_die.attributes:
+                count *= subrange_die.attributes['DW_AT_count'].value
+            elif 'DW_AT_upper_bound' in subrange_die.attributes:
+                upper = subrange_die.attributes['DW_AT_upper_bound'].value
+                if 'DW_AT_lower_bound' in subrange_die.attributes:
+                    lower = subrange_die.attributes['DW_AT_lower_bound'].value
+                else:
+                    lower = 1 if one_based_lang(get_lang(die.cu)) else 0 
+                count *= (upper - lower + 1)
+            else:
+                return None # Subrange DIE with neither upper nor count
+    # No subranges at all means 1. Is that correct?
+    return count
 
 # Chases the type chain to something with a size.
 def decode_size(die):
@@ -43,32 +63,41 @@ def decode_size(die):
     if die.tag in ('DW_TAG_pointer_type', 'DW_TAG_subroutine_type'):
         return die.cu.header.address_size
         
-    # Arrays specify their size in different ways...
-    # TODO: multidim arrays
-    if die.tag == 'DW_TAG_array_type' and 'DW_AT_type' in attr:
-        elem_size = decode_size(die.get_DIE_from_attribute('DW_AT_type'))
+    if die.tag == 'DW_TAG_array_type':
+        ta = elem_size = count = None
+        if 'DW_AT_type' in attr:
+            ta = 'DW_AT_type'
+        elif 'DW_AT_user_def_type' in attr: 
+            ta = 'DW_AT_user_def_type'
+        elif 'DW_AT_mod_u_d_type' in attr: 
+            mut = parse_mod_user_type(attr['DW_AT_mod_u_d_type'].value, die)
+            if mods_have_pointer(mut[:-1]):
+                elem_size = die.cu.header.address_size
+            else:
+                ta = 'DW_AT_mod_u_d_type'
+        elif 'DW_AT_mod_fund_type' in attr:
+            mft = parse_mod_fund_type(attr['DW_AT_mod_fund_type'].value, die)
+            if mods_have_pointer(mut[:-1]):
+                elem_size = die.cu.header.address_size
+            else:
+                elem_size = fundamental_type_size(mft[-1], die)
+        elif 'DW_AT_fund_type' in attr:
+            ft = die.get_DIE_from_attribute('DW_AT_fund_type').value
+            elem_size = fundamental_type_size(ft, die)
+        elif die.cu.header.version == 1 and 'DW_AT_subscr_data' in attr:
+            (count, elem_size) = decode_array_subscripts(die.attributes['DW_AT_subscr_data'].value, die, decode_size)
+            if elem_size is not None and count is not None:
+                return count * elem_size
+            else:
+                return None
+        # Moving on to parsing the pointed-at type for element size
+        if ta:
+            elem_size = decode_size(die.get_DIE_from_attribute(ta))
+
         if not elem_size:
             return None
-        count = 1
-        got_subranges = False
-        for subrange_die in die.iter_children():
-            if subrange_die.tag == 'DW_TAG_subrange_type':
-                got_subranges = True
-                if 'DW_AT_count' in subrange_die.attributes:
-                    count *= subrange_die.attributes['DW_AT_count'].value
-                elif 'DW_AT_upper_bound' in subrange_die.attributes:
-                    upper = subrange_die.attributes['DW_AT_upper_bound'].value
-                    if 'DW_AT_lower_bound' in subrange_die.attributes:
-                        lower = subrange_die.attributes['DW_AT_lower_bound'].value
-                    else:
-                        lower = 1 if one_based_lang(get_lang(die.cu)) else 0 
-                    count *= (upper - lower + 1)
-                else:
-                    return None # Neither upper nor count
-        # Does no subranges or subrange with no count/upper mean an array of one???
-        if not got_subranges:
-            count = 1
-        return elem_size * count
+        
+        return array_count(die) * elem_size
 
 # Context is a format specifier string that takes name
 def get_context(die):
@@ -98,6 +127,7 @@ def get_context(die):
         prefix = ''.join(f'{c}::' for c in context)
         return f'{prefix}%s'
 
+# returns (display_name, size). Size can be None.
 def decode_var(die):
     size = None
     type_die = None # May be defined in spec
@@ -107,10 +137,23 @@ def decode_var(die):
         die = die.get_DIE_from_attribute('DW_AT_abstract_origin')
     attr = die.attributes
 
+    # In v2+, the size is never in the variable. In v1, it sometimes is.
+    if die.cu.header.version == 1:
+        if 'DW_AT_fund_type' in attr:
+            size = fundamental_type_size(attr['DW_AT_fund_type'].value, die)
+        elif 'DW_AT_mod_fund_type' in attr:
+            mft = parse_mod_fund_type(attr['DW_AT_mod_fund_type'].value, die)
+            size = die.cu.header.address_size if mods_have_pointer(mft[:-1]) else fundamental_type_size(mft[-1], die)
+        elif 'DW_AT_mod_u_d_type' in attr:
+            mut = parse_mod_user_type(attr['DW_AT_mod_u_d_type'].value, die)
+            if mods_have_pointer(mut[:-1]):
+                size = die.cu.header.address_size
+            type_die = die.get_DIE_at_offset(mut[-1])
+        elif 'DW_AT_user_def_type' in attr:
+            type_die = die.get_DIE_from_attribute('DW_AT_user_def_type')
+
     if 'DW_AT_type' in attr:
         type_die = die.get_DIE_from_attribute('DW_AT_type')
-    elif 'DW_AT_user_def_type' in attr:
-        type_die = die.get_DIE_from_attribute('DW_AT_user_def_type')
 
     if 'DW_AT_specification' in attr:
         spec_die = die.get_DIE_from_attribute('DW_AT_specification')
@@ -119,10 +162,14 @@ def decode_var(die):
     else:
         spec_die = die
 
-    size = decode_size(type_die) if type_die else None
+    if size is None and type_die:
+        size = decode_size(type_die)
+
+    # ----------------- Now the name
     
     # No lexical block disambig
     # No overloaded function disambig
+    # If not none, context is a format string for var name
     context = get_context(spec_die)
 
     name = safe_DIE_name(die, False)

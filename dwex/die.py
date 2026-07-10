@@ -1,5 +1,6 @@
 from bisect import bisect_right
 from collections.abc import Sequence
+from io import BytesIO
 from PyQt6.QtCore import Qt, QAbstractTableModel, QModelIndex
 from elftools.dwarf.locationlists import LocationParser, LocationExpr
 from elftools.dwarf.dwarf_expr import DWARFExprParser, DWARFExprOp
@@ -7,7 +8,7 @@ from elftools.dwarf.descriptions import _DESCR_DW_LANG, _DESCR_DW_ATE, _DESCR_DW
 from elftools.common.exceptions import ELFParseError
 
 from .exprutil import ExprFormatter, is_parsed_expression
-from .dwarfone import DWARFExprParserV1
+from .dwarfone import ArraySubDimension, DWARFExprParserV1, ENUM_FUND_TYPE_reverse, parse_array_subscripts, parse_mod_fund_type, parse_mod_user_type
 from .dwarfutil import *
 from .details import GenericTableModel, FixedWidthTableModel
 from .exprdlg import ExpressionTableModel, ExpressionDlg, op_has_nested_expression
@@ -31,6 +32,11 @@ _ll_headers = ("Attribute", "Offset", "Form", "Raw", "Value")
 _noll_headers = ("Attribute", "Form", "Value")
 _meta_desc = ('DIE offset', 'DIE size', 'Abbrev code', 'Has children') # Anything else?
 _meta_count = 4 # Extra rows if low level detail showing is set
+
+REF_FORMS = ('DW_FORM_ref', 'DW_FORM_ref1', 'DW_FORM_ref2', 'DW_FORM_ref4', 'DW_FORM_ref8', 'DW_FORM_ref_addr')
+REF_ATTRS = ('DW_AT_user_def_type', 'DW_AT_mod_u_d_type')
+def _attr_has_reference(attr, die):
+    return attr.form in REF_FORMS or attr.name in REF_ATTRS or (attr.name == 'DW_AT_subscr_data' and parse_array_subscripts(attr.value, die)[-1].attr in REF_ATTRS)
 
 class DIETableModel(QAbstractTableModel):
     def __init__(self, die, prefix, lowlevel, hex, regnames):
@@ -109,7 +115,7 @@ class DIETableModel(QAbstractTableModel):
                 tip += "Click to see it all"
             return tip
         elif role == Qt.ItemDataRole.ForegroundRole:
-            if attr.form in ('DW_FORM_ref', 'DW_FORM_ref1', 'DW_FORM_ref2', 'DW_FORM_ref4', 'DW_FORM_ref8', 'DW_FORM_ref_addr'):
+            if _attr_has_reference(attr, self.die):
                 return blue_brush
         elif role == Qt.ItemDataRole.BackgroundRole:
             if self.lowlevel and index.column() == 3 and attr.raw_value == attr.value:
@@ -205,6 +211,14 @@ class DIETableModel(QAbstractTableModel):
                 return "%d %s" % (val, _DESCR_DW_INL[val]) if val in _DESCR_DW_INL else val
             elif key == 'DW_AT_calling_convention':
                 return "%d %s" % (val, _DESCR_DW_CC[val]) if val in _DESCR_DW_CC else val
+            elif key == 'DW_AT_fund_type':
+                s = f'{val}'
+                if val in ENUM_FUND_TYPE_reverse:
+                    ft = ENUM_FUND_TYPE_reverse[val]
+                    if not self.prefix:
+                        ft = ft[3:]
+                    s += f' ({ft})' 
+                return s
             elif key in ('DW_AT_decl_file', 'DW_AT_call_file'):
                 cu = self.die.cu
                 if cu._lineprogram is None:
@@ -358,6 +372,11 @@ class DIETableModel(QAbstractTableModel):
     # For attributes that refer to larger data structures (ranges, locations), makes sense to spell it out into a table
     # Row is metadata unaware
     def get_attribute_details(self, index):
+        prefix = self.prefix
+        format_mod = lambda m: m if prefix else m[4:]
+        format_mod_chain = lambda mods: ' '.join(format_mod(m) for m in mods) + ' '
+        format_fund_type = lambda t: t if prefix else t[3:]
+
         row = index.row()
         if row >= self.meta_count:
             row -= self.meta_count
@@ -399,6 +418,67 @@ class DIETableModel(QAbstractTableModel):
                 return GenericTableModel(('Address', 'File', 'Line', 'Stmt', 'Basic block', 'End seq', 'End prologue', 'Begin epilogue'), states)
             elif key in ('DW_AT_upper_bound', 'DW_AT_lower_bound') and is_block(form):
                 return ExpressionTableModel(self.parse_expr(attr.value), self.expr_formatter)
+            elif key == 'DW_AT_subscr_data': # V1 subscript data
+                prefix = self.prefix
+                lines = parse_array_subscripts(attr.value, self.die)
+
+                def format_bound(b):
+                    if isinstance(b, int):
+                        return hex(b) if self.hex else str(b)
+                    else: # Expression blob
+                        self.dump_expr(b)
+
+                def format_range_line(l):
+                    return (l.fmt if prefix else l.fmt[4:],
+                            (l.index_type if prefix else l.index_type[3:]) if l.fmt[4] == 'F' else f'DIE at 0x{l.index_type:x}',
+                             format_bound(l.low),
+                             format_bound(l.high),
+                             None)
+                
+                def format_elem_type(attr, t):
+                    if attr == 'DW_AT_fund_type':
+                        return format_fund_type(t)
+                    elif attr == 'DW_AT_user_def_type':
+                        return f'DIE at 0x{t:x}'
+                    elif attr == 'DW_AT_mod_fund_type':
+                        return format_mod_chain(t[:-1]) + format_fund_type(t[-1])
+                    elif attr == 'DW_AT_mod_u_d_type':
+                        return format_mod_chain(t[:-1]) + f'DIE at 0x{t[-1]:x}'
+                    else:
+                        return str(t)
+                        
+                def format_element_line(l):
+                    return (l.fmt if prefix else l.fmt[4:], None, None, None, format_elem_type(l.attr, l.elem_type))
+                
+                return GenericTableModel(('Format', 'Index type', 'Low', 'High', 'Element type'),
+                    tuple(format_range_line(l) if isinstance(l, ArraySubDimension) else format_element_line(l) for l in lines))
+            elif key == 'DW_AT_mod_fund_type':
+                mft = parse_mod_fund_type(attr.value, self.die)
+                return GenericTableModel(('Modifier', 'Type'),
+                    tuple(((format_mod(m), None) for m in mft[:-1])) + ((None, format_fund_type(mft[-1])), ))
+            elif key == 'DW_AT_mod_u_d_type':
+                mut = parse_mod_user_type(attr.value, self.die)
+                return GenericTableModel(('Modifier', 'Type'),
+                    tuple(((format_mod(m), None) for m in mut[:-1])) + ((None, f'DIE at 0x{mut[-1]:X}'), ))
+            elif key == 'DW_AT_element_list':
+                le = self.die.cu.structs.little_endian
+                bo = 'little' if le else 'big'
+                size = self.die.attributes['DW_AT_byte_size'].value if 'DW_AT_byte_size' in self.die.attributes else self.die.cu.header.address_size
+                block = attr.value
+                n = len(block)
+                pos = 0
+                lines = []
+                while pos < n:
+                    value = int.from_bytes(block[pos:pos+size], byteorder=bo)
+                    pos += size
+                    if pos < n:
+                        pe = next((i for i in range(pos, n) if block[i] == 0), n)
+                        s = bytes(block[pos:pe]).decode('utf-8', errors='ignore')
+                        pos = pe + 1
+                        lines.append((hex(value) if self.hex else str(value), s))
+                    else:
+                        break
+                return GenericTableModel(('Value', 'Display name'), lines)
             elif is_long_blob(attr):
                 val = attr.value
                 def format_line(off):
@@ -412,12 +492,32 @@ class DIETableModel(QAbstractTableModel):
         val = attr.value
         form = attr.form
         if form in ('DW_FORM_ref1', 'DW_FORM_ref2', 'DW_FORM_ref4', 'DW_FORM_ref8'):
-            return (self.die.cu, attr.value + self.die.cu.cu_offset)
+            return (self.die.cu, val + self.die.cu.cu_offset)
         elif form in ('DW_FORM_ref_addr', 'DW_FORM_ref'):
             cualen = len(self.die.cu.dwarfinfo._unsorted_CUs)
             i = bisect_right(self.die.cu.dwarfinfo._CU_offsets, val) - 1
             cu = self.die.cu.dwarfinfo._unsorted_CUs[i]
-            return (cu, attr.value)
+            return (cu, val)
+        elif attr.name == 'DW_AT_user_def_type': # V1 only...
+            target_die = self.die.get_DIE_at_offset(val)
+            if target_die:
+                return (target_die.cu, val)
+        elif attr.name == 'DW_AT_mod_u_d_type': # V1 only...
+            mut = parse_mod_user_type(val, self.die)
+            target_die = self.die.get_DIE_at_offset(mut[-1])
+            if target_die:
+                return (target_die.cu, target_die.offset)
+        elif attr.name == 'DW_AT_subscr_data': # V1 only...
+            type = parse_array_subscripts(val, self.die)[-1]
+            offset = None
+            if type.attr == 'DW_AT_user_def_type':
+                offset = type.elem_type
+            elif type.attr == 'DW_AT_mod_u_d_type':
+                offset = type.elem_type[-1]
+            if offset is not None:
+                target_die = self.die.get_DIE_at_offset(offset)
+                if target_die:
+                    return (target_die.cu, offset)
 
     # Returns (cu, die_offset) or None if not a navigable
     def ref_target(self, index):
