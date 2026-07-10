@@ -13,7 +13,9 @@ def gather_to_dialog(win, dwarfinfo, thread_class, dlg_class, hex, progress_text
             if dlg.exec() == QDialog.DialogCode.Accepted and dlg.selected_die:
                 win.navigate_to_die(dlg.selected_die)
         elif th.exc:
-            print(th.exc)
+            win.show_warning(f"Sorry, an error occurred while analyzing this binary. Consider reporting this to the author.\n\n{th.exc}")
+        else:
+            win.show_warning('None found. Could be a deficiency of the analysis.')
 
     last_CU = dwarfinfo._unsorted_CUs[-1]
     pd = QProgressDialog(progress_text, 'Cancel', 0, last_CU.cu_offset + last_CU.size, win, Qt.WindowType.Dialog)
@@ -41,10 +43,15 @@ class GatherThread(QThread):
     def postprocess(self, result):
         pass
 
+    # Override this
+    def on_cu(self, cu):
+        pass
+
     def run(self):
         try:
             result = []
             for cu in self.dwarfinfo._unsorted_CUs:
+                self.on_cu(cu)
                 for die in cu.iter_DIEs():
                     self.yieldCurrentThread()
                     if self.cancelled:

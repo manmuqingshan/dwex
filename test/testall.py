@@ -1,17 +1,14 @@
 import os, sys
+from time import time
 from PyQt6.QtCore import Qt, QAbstractItemModel, QAbstractTableModel, QModelIndex
 sys.path.insert(1, os.getcwd()) # To make sure dwex resolves to local path
 from elftools.dwarf.locationlists import LocationParser, LocationExpr
 from dwex.formats import read_dwarf
 from dwex.die import DIETableModel
 from dwex.dwarfutil import strip_path
+from dwex.datasec import GatherStaticDataThread
 
-def test_dwarfinfo(di):
-    # Some global cache setup in line with the app proper
-    di._ranges = None
-    di._CUs = [cu for cu in di.iter_CUs()]
-    di._locparser = None
-
+def test_render(di):
     m = False
     dummy_index = QModelIndex()
     for (i, CU) in enumerate(di._CUs):
@@ -62,22 +59,70 @@ def test_dwarfinfo(di):
                     details = m.get_attribute_details(m.index(r, 0, dummy_index))
                     m.set_lowlevel(True, dummy_index)
 
+def test_datasection(di):
+    class Thread(GatherStaticDataThread):
+        def yieldCurrentThread(self):
+            pass
+
+    def decorate_cu(cu, i):
+        cu._i = i
+        cu._lineprogram = None
+        cu._exprparser = None
+        return cu
+    
+    di._unsorted_CUs = CUs = [decorate_cu(cu, i) for (i, cu) in enumerate(di.iter_CUs())]
+    thread = Thread(None, di)
+    last_CU = CUs[-1]
+    end_offset = last_CU.cu_offset + last_CU.size
+    ts = time()
+    def on_progress(v):
+        nonlocal ts
+        ts_now = time()
+        if ts_now - ts >= 10:
+            print(f"{(v*100)//end_offset}%")
+            ts = ts_now
+    thread.progress.connect(on_progress)
+    thread.run()
+    if thread.exc:
+        print(f"Exception occurred: {thread.exc.message}")
+    elif not len(thread.result):
+        print(f"No results")
+    else:
+        #if next((s for s in thread.result if s.size is None), False):
+        #    print("Warning: Some lines have undefined size.")
+        for s in thread.result:
+            if s.size is None:
+                print(f"0x{s.die.offset:X}")
+
+def test_dwarfinfo(di):
+    # Some global cache setup in line with the app proper
+    di._ranges = None
+    di._CUs = [cu for cu in di.iter_CUs()]
+    di._locparser = None
+
+    #test_render(di)
+    test_datasection(di)
+
+
 def test_file_for(filename, on_di):    
     print("=================== " + filename)
     arches = False
-    def save_arches(a):
+    def save_arches(a, _, __):
         nonlocal arches
         arches = a
         return None # Cancel out of loading
-    di = read_dwarf(filename, save_arches)
-    if arches: # Fat binary - go through all through architectures
-        for arch_no in range(0, len(arches)):
-            print("----------- " + arches[arch_no])
-            di = read_dwarf(filename, lambda arches:arch_no)
-            if di:
-                on_di(di)
-    elif di:
-        on_di(di)
+    try:
+        di = read_dwarf(filename, save_arches)
+        if arches: # Fat binary - go through all through architectures
+            for arch_no in range(0, len(arches)):
+                print("----------- " + arches[arch_no])
+                di = read_dwarf(filename, lambda arches, _, __:arch_no)
+                if di:
+                    on_di(di)
+        elif di and di.debug_info_sec:
+            on_di(di)
+    except Exception as e:
+        print(f"Exception while loading: {e}")
 
 def test_file(filename):
     test_file_for(filename, test_dwarfinfo)

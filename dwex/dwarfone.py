@@ -19,6 +19,18 @@ TAG_reverse = dict((v, k) for k, v in ENUM_DW_TAG.items())
 ATTR_reverse = dict((v, k) for k, v in ENUM_DW_AT.items())
 FORM_reverse = dict((v, k) for k, v in ENUM_DW_FORM.items())
 
+ENUM_FMT = dict(
+   FMT_FT_C_C = 0,
+   FMT_FT_C_X = 1,
+   FMT_FT_X_C = 2,
+   FMT_FT_X_X = 3,
+   FMT_UT_C_C = 4,
+   FMT_UT_C_X = 5,
+   FMT_UT_X_C = 6,
+   FMT_UT_X_X = 7,
+   FMT_ET = 8
+)
+
 DW_OP_name2opcode = dict(
     DW_OP_reg = 0x01,
     DW_OP_basereg = 0x02,
@@ -101,6 +113,19 @@ class DIEV1(object):
 
     def sibling(self):
         return self.attributes['DW_AT_sibling'].value
+    
+    def get_DIE_from_attribute(self, attr_name):
+        if attr_name in self.attributes:
+            offset = self.attributes[attr_name].value
+            cu = self.cu
+            if cu.cu_offset <= offset < cu.cu_offset + cu.header.unit_length:
+                return cu.DIE_at_offset(offset)
+            else:
+                target_cu = next((c for c in self.dwarfinfo.iter_CUs() if c.cu_offset <= offset < c.cu_offset + c.header.unit_length), None)
+                if target_cu:
+                    return target_cu.DIE_at_offset(offset)
+                raise ValueError(f"Attribute {attr_name} with offset 0x{offset:X} is out of bounds.")
+        return None
 
 class CompileUnitV1(object):
     def __init__(self, di, top_die):
