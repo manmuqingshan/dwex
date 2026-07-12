@@ -22,7 +22,7 @@ from .datasec import GatherStaticDataThread, DataSectionDlg
 from .gather import gather_to_dialog
 
 # Sync with version in setup.py
-version = (4, 87)
+version = (4, 90)
 the_app = None
 
 # Env variables (all boolean):

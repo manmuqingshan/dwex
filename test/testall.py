@@ -59,8 +59,25 @@ def test_render(di):
                     details = m.get_attribute_details(m.index(r, 0, dummy_index))
                     m.set_lowlevel(True, dummy_index)
 
+# The logic of tracking down the type is more involved
+# This is just for a quick dump
+def get_var_DIE_type(die):
+    if 'DW_AT_abstract_origin' in die.attributes: # Inside inlined_subroutine, jump to the abstract subtree - that's where the type and the spec are
+        die = die.get_DIE_from_attribute('DW_AT_abstract_origin')
+    type_die = None
+    if 'DW_AT_type' in die.attributes:
+        type_die = die.get_DIE_from_attribute('DW_AT_type')
+
+    if 'DW_AT_specification' in die.attributes:
+        spec_die = die.get_DIE_from_attribute('DW_AT_specification')
+        if not type_die and 'DW_AT_type' in spec_die.attributes:
+            type_die = spec_die.get_DIE_from_attribute('DW_AT_type')
+        
+    if type_die:
+        return type_die.tag[7:]
+
 def test_datasection(di):
-    class Thread(GatherStaticDataThread):
+    class FakeThread(GatherStaticDataThread):
         def yieldCurrentThread(self):
             pass
 
@@ -71,7 +88,7 @@ def test_datasection(di):
         return cu
     
     di._unsorted_CUs = CUs = [decorate_cu(cu, i) for (i, cu) in enumerate(di.iter_CUs())]
-    thread = Thread(None, di)
+    thread = FakeThread(None, di)
     last_CU = CUs[-1]
     end_offset = last_CU.cu_offset + last_CU.size
     ts = time()
@@ -92,7 +109,7 @@ def test_datasection(di):
         #    print("Warning: Some lines have undefined size.")
         for s in thread.result:
             if s.size is None:
-                print(f"0x{s.die.offset:X}")
+                print(f"0x{s.die.offset:X} {get_var_DIE_type(s.die)}")
 
 def test_dwarfinfo(di):
     # Some global cache setup in line with the app proper

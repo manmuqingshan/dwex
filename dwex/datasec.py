@@ -94,10 +94,12 @@ def decode_size(die):
         if ta:
             elem_size = decode_size(die.get_DIE_from_attribute(ta))
 
-        if not elem_size:
+        # In v2+, the size is not in the array DIE itself
+        count = array_count(die)
+        if elem_size is None or count is None:
             return None
         
-        return array_count(die) * elem_size
+        return count * elem_size
 
 # Context is a format specifier string that takes name
 def get_context(die):
