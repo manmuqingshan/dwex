@@ -176,11 +176,11 @@ class DIETableModel(QAbstractTableModel):
     
     # Big DIE attribute value interpreter for the top right table
     def format_value(self, attr):
+        die = self.die
+        cu = self.die.cu
+        header = self.die.cu.header
+        dwarf_version = self.die.cu.header.version
         try:
-            die = self.die
-            cu = self.die.cu
-            header = self.die.cu.header
-            dwarf_version = self.die.cu.header.version
 
             key = attr.name
             val = attr.value
@@ -281,7 +281,12 @@ class DIETableModel(QAbstractTableModel):
                 tb = exc.__traceback__
                 di = die.cu.dwarfinfo
                 file_addr_size = di.config.default_address_size
-                loc_section = di.debug_loclists_sec if dwarf_version >= 5 else di.debug_loc_sec
+                if dwarf_version >= 5:
+                    loc_section = di.debug_loclists_sec
+                elif dwarf_version >= 2:
+                    loc_section = di.debug_loc_sec
+                else:
+                    loc_section = None
                 loc_sec_len = len(loc_section.stream.getbuffer()) if loc_section else None
                 ctxt = {'attr': attr,
                         'die': die,
