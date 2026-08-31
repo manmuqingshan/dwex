@@ -123,8 +123,9 @@ except:
 
 setup(
     name='dwex',
-    version='4.91',  # Sync with version in __main__
+    version='4.92',  # Sync with version in __main__
     packages=['dwex'],
+    package_data={'dwex': ['*.py', 'ctypes/*.py', 'filebytes/*.py']},
     url="https://github.com/sevaa/dwex/",
     entry_points={"gui_scripts": ["dwex = dwex.__main__:main"]},
     cmdclass={'install': my_install},
